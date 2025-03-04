@@ -26,6 +26,7 @@ from themes import THEMES, get_theme
 logging.basicConfig(filename="logs.txt", level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
+
 #########################################
 # Функция для отправки сообщения
 #########################################
@@ -41,6 +42,7 @@ def send_email(smtp_server, smtp_port, username, password, msg, timeout=30):
             server.starttls()
             server.login(username, password)
             server.send_message(msg)
+
 
 #########################################
 # Фоновый поток для отправки писем
@@ -129,6 +131,7 @@ class EmailSenderThread(QThread):
     def stop(self):
         self._is_running = False
 
+
 #########################################
 # Тестовый поток для отправки тестового письма
 #########################################
@@ -155,6 +158,7 @@ class TestEmailThread(QThread):
         except Exception as e:
             self.result.emit(str(e))
 
+
 #########################################
 # Основной класс GUI
 #########################################
@@ -176,13 +180,25 @@ class EmailSenderGUI(QWidget):
 
     def init_key(self):
         self.key_file = "secret.key"
+        generate_new = False
         if not os.path.exists(self.key_file):
+            generate_new = True
+        else:
+            try:
+                with open(self.key_file, "rb") as f:
+                    key = f.read().strip()
+                if len(key) != 44:
+                    generate_new = True
+            except Exception:
+                generate_new = True
+
+        if generate_new:
             key = Fernet.generate_key()
             with open(self.key_file, "wb") as f:
                 f.write(key)
-        else:
-            with open(self.key_file, "rb") as f:
-                key = f.read()
+            # Устанавливаем атрибут "скрытый" для файла (только для Windows)
+            if os.name == 'nt':
+                os.system(f'attrib +h {self.key_file}')
         self.cipher_suite = Fernet(key)
 
     def encrypt_password(self, password):
@@ -219,14 +235,19 @@ class EmailSenderGUI(QWidget):
     def update_account_combo(self):
         self.account_combo.clear()
         if "ACCOUNTS" in self.config:
-            for account in self.config["ACCOUNTS"]:
-                self.account_combo.addItem(account)
+            accounts = list(self.config["ACCOUNTS"].keys())
+            self.account_combo.addItems(accounts)
+            # Если ровно одна учётная запись, загрузим поля автоматически
+            if len(accounts) == 1:
+                self.load_account_fields(accounts[0])
 
     def load_account_fields(self, account_name: str):
+        print("DEBUG: load_account_fields called with:", account_name)
         if not account_name:
             return
         account_data = self.config["ACCOUNTS"].get(account_name)
         if not account_data:
+            print("Данные учетной записи не найдены!")
             return
         try:
             smtp_server, smtp_port, encrypted_pass = account_data.split(',')
@@ -234,10 +255,12 @@ class EmailSenderGUI(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить данные учетной записи: {e}")
             return
+
         self.smtp_server_input.setText(smtp_server)
         self.smtp_port_input.setText(smtp_port)
         self.smtp_user_input.setText(account_name)
         self.smtp_pass_input.setText(smtp_pass)
+        print("Поля заполнены:", smtp_server, smtp_port, account_name, smtp_pass)
 
     def test_email(self):
         selected_account = self.account_combo.currentText()
@@ -280,10 +303,35 @@ class EmailSenderGUI(QWidget):
         layout.addWidget(self.tabs)
         self.setLayout(layout)
 
+    def delete_account(self):
+        selected_account = self.account_combo.currentText()
+        if not selected_account:
+            QMessageBox.warning(self, "Ошибка", "Нет выбранной учетной записи для удаления!")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Подтверждение",
+            f"Вы действительно хотите удалить учетную запись {selected_account}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if confirm == QMessageBox.Yes:
+            if selected_account in self.config["ACCOUNTS"]:
+                del self.config["ACCOUNTS"][selected_account]
+                with open("config.ini", "w") as configfile:
+                    self.config.write(configfile)
+                QMessageBox.information(self, "Успех", "Учетная запись удалена!")
+                self.update_account_combo()
+                # Очищаем поля
+                self.smtp_server_input.clear()
+                self.smtp_port_input.clear()
+                self.smtp_user_input.clear()
+                self.smtp_pass_input.clear()
+
     def settings_tab(self):
         tab = QWidget()
         layout = QVBoxLayout()
 
+        # Поля для ввода настроек SMTP
         self.smtp_server_input = QLineEdit()
         self.smtp_server_input.setPlaceholderText("SMTP сервер")
         self.smtp_port_input = QLineEdit()
@@ -297,6 +345,7 @@ class EmailSenderGUI(QWidget):
         btn_save_account = QPushButton("Сохранить учетную запись")
         btn_save_account.clicked.connect(self.save_account)
 
+        # Выпадающий список для сохранённых учетных записей
         self.account_combo = QComboBox()
         self.update_account_combo()
         self.account_combo.currentTextChanged.connect(self.load_account_fields)
@@ -304,6 +353,10 @@ class EmailSenderGUI(QWidget):
         btn_test_email = QPushButton("Тестовое письмо")
         btn_test_email.clicked.connect(self.test_email)
 
+        btn_delete_account = QPushButton("Удалить учетную запись")
+        btn_delete_account.clicked.connect(self.delete_account)
+
+        # Блок выбора темы оформления
         theme_layout = QHBoxLayout()
         theme_label = QLabel("Выберите тему:")
         self.theme_combo = QComboBox()
@@ -324,10 +377,27 @@ class EmailSenderGUI(QWidget):
         layout.addWidget(QLabel("Сохраненные учетные записи:"))
         layout.addWidget(self.account_combo)
         layout.addWidget(btn_test_email)
+        layout.addWidget(btn_delete_account)
         layout.addLayout(theme_layout)
 
         tab.setLayout(layout)
         return tab
+
+    def delete_selected_email(self):
+        selected_items = self.email_list.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "Информация", "Не выбраны email-адреса для удаления.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Подтверждение",
+            "Вы уверены, что хотите удалить выбранные email-адреса?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if confirm == QMessageBox.Yes:
+            for item in selected_items:
+                self.email_list.takeItem(self.email_list.row(item))
+            self.save_emails_persistent()
 
     def email_list_tab(self):
         tab = QWidget()
@@ -359,7 +429,8 @@ class EmailSenderGUI(QWidget):
 
     def load_email_list(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Выбрать файл", "", "Файлы CSV/XLSX/TXT (*.csv *.xlsx *.txt)")
+            self, "Выбрать файл", "", "Файлы CSV/XLSX/TXT (*.csv *.xlsx *.txt)"
+        )
         if file_path:
             try:
                 if file_path.endswith(".csv"):
@@ -452,7 +523,8 @@ class EmailSenderGUI(QWidget):
 
     def add_attachment(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Выбрать файл для вложения", "", "Все файлы (*)")
+            self, "Выбрать файл для вложения", "", "Все файлы (*)"
+        )
         if file_path:
             self.attachments.append(file_path)
             self.attachment_list.addItem(file_path)
@@ -507,9 +579,11 @@ class EmailSenderGUI(QWidget):
         self.log_output.append("Отправка началась...")
         self.progress_bar.setValue(0)
 
-        self.email_thread = EmailSenderThread(smtp_server, smtp_port, smtp_user, smtp_pass, emails,
-                                              subject, body, cc, bcc, self.attachments,
-                                              request_read_receipt, request_delivery_receipt)
+        self.email_thread = EmailSenderThread(
+            smtp_server, smtp_port, smtp_user, smtp_pass, emails,
+            subject, body, cc, bcc, self.attachments,
+            request_read_receipt, request_delivery_receipt
+        )
         self.email_thread.progress.connect(self.progress_bar.setValue)
         self.email_thread.log.connect(self.log_output.append)
         self.email_thread.finished_signal.connect(self.sending_finished)
@@ -544,8 +618,12 @@ class EmailSenderGUI(QWidget):
     def closeEvent(self, event):
         event.ignore()
         self.hide()
-        self.tray_icon.showMessage("Email Sender", "Приложение свернуто в трей.",
-                                   QSystemTrayIcon.Information, 2000)
+        self.tray_icon.showMessage(
+            "Email Sender",
+            "Приложение свернуто в трей.",
+            QSystemTrayIcon.Information,
+            2000
+        )
 
 
 if __name__ == "__main__":
